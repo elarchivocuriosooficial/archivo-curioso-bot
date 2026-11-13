@@ -32,7 +32,7 @@ def _openverse(q, destino, usadas):
     r = requests.get(
         "https://api.openverse.org/v1/images/",
         params={"q": q, "license": "cc0,pdm", "page_size": 20, "mature": "false"},
-        headers=UA, timeout=30,
+        headers=UA, timeout=12,
     )
     r.raise_for_status()
     res = [x for x in r.json().get("results", [])
@@ -83,8 +83,51 @@ def _wikimedia(q, destino, usadas):
     return None
 
 
+PIXABAY_KEY = os.environ.get("PIXABAY_KEY", "")
+
+
+def buscar_clips(q, carpeta, usados, n=3):
+    """Descarga hasta n clips de vídeo de Pixabay para la búsqueda q. Devuelve rutas."""
+    if not PIXABAY_KEY:
+        return []
+    rutas = []
+    for consulta in (q, " ".join(q.split()[:2]), q.split()[0]):
+        try:
+            r = requests.get("https://pixabay.com/api/videos/",
+                             params={"key": PIXABAY_KEY, "q": consulta[:100], "per_page": 20,
+                                     "safesearch": "true", "order": "relevant"},
+                             headers=UA, timeout=20)
+            r.raise_for_status()
+            hits = r.json().get("hits", [])
+        except Exception as e:
+            print(f"[clips] pixabay '{consulta}': {e}")
+            continue
+        for h in hits:
+            if h["id"] in usados or h.get("duration", 0) < 3:
+                continue
+            v = h.get("videos", {})
+            elegido = next((v[k] for k in ("large", "medium", "small")
+                            if v.get(k, {}).get("url") and 700 <= v[k].get("height", 0) <= 2200), None)
+            if not elegido:
+                continue
+            destino = Path(carpeta) / f"clip{h['id']}.mp4"
+            try:
+                rr = requests.get(elegido["url"], headers=UA, timeout=90)
+                rr.raise_for_status()
+                destino.write_bytes(rr.content)
+            except Exception:
+                continue
+            usados.add(h["id"])
+            rutas.append(destino)
+            if len(rutas) >= n:
+                return rutas
+        if rutas:
+            return rutas
+    return rutas
+
+
 def buscar_imagen(q, destino, usadas):
-    for fuente in (_openverse, _wikimedia):
+    for fuente in (_wikimedia, _openverse):
         for consulta in (q, " ".join(q.split()[:2])):
             try:
                 info = fuente(consulta, destino, usadas)
@@ -204,6 +247,19 @@ def clip_escena(imagen, dur, salida, idx):
          "-crf", "20", "-an", str(salida)])
 
 
+def tramo_video(clip, dur, salida, idx):
+    """Recorta un clip a 9:16, con un leve empuje de cámara, y lo deja en dur segundos."""
+    total = duracion(clip)
+    ini = max(0.0, min(total - dur - 0.1, total * 0.15)) if total > dur + 0.5 else 0.0
+    zi = idx % 2 == 0
+    z = f"(1.04+0.05*t/{dur:.2f})" if zi else f"(1.09-0.05*t/{dur:.2f})"
+    vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+          f"scale=w='trunc({W}*{z}/2)*2':h='trunc({H}*{z}/2)*2':eval=frame,"
+          f"crop={W}:{H},eq=contrast=1.06:saturation=1.12,fps={FPS},format=yuv420p")
+    run(["ffmpeg", "-y", "-ss", f"{ini:.2f}", "-stream_loop", "-1", "-i", str(clip), "-t", f"{dur:.3f}",
+         "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(salida)])
+
+
 def fondo_liso(salida):
     color = random.choice(["0x1b1f3a", "0x2a1b3a", "0x13293d", "0x3a1b1b"])
     run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={color}:s={W}x{H}", "-frames:v", "1", str(salida)])
@@ -217,20 +273,31 @@ def generar(guion, carpeta_salida="salida"):
     clips, audios, todas = [], [], []
     t0 = 0.0
     usadas = set()
+    usadas_vid = set()
     for i, esc in enumerate(guion["escenas"]):
         mp3 = tmp / f"a{i}.mp3"
         palabras = asyncio.run(tts(esc["texto"], mp3))
         dur = duracion(mp3) + 0.15
         todas += [(t0 + a, t0 + b, w) for a, b, w in palabras]
-        img = tmp / f"i{i}.jpg"
-        info = buscar_imagen(esc.get("imagen") or guion["titulo"], img, usadas)
-        if info is None:
-            fondo_liso(img)
-        elif info.get("credito"):
-            creditos.append(info["credito"])
-        clip = tmp / f"c{i}.mp4"
-        clip_escena(img, dur, clip, i)
-        clips.append(clip)
+        consulta = esc.get("video") or esc.get("imagen") or guion["titulo"]
+        n_cortes = max(1, min(3, round(dur / 2.4)))
+        fuentes = buscar_clips(consulta, tmp, usadas_vid, n_cortes)
+        if fuentes:
+            trozo = dur / n_cortes
+            for k in range(n_cortes):
+                seg = tmp / f"c{i}_{k}.mp4"
+                tramo_video(fuentes[k % len(fuentes)], trozo, seg, i + k)
+                clips.append(seg)
+        else:
+            img = tmp / f"i{i}.jpg"
+            info = buscar_imagen(esc.get("imagen") or consulta, img, usadas)
+            if info is None:
+                fondo_liso(img)
+            elif info.get("credito"):
+                creditos.append(info["credito"])
+            clip = tmp / f"c{i}.mp4"
+            clip_escena(img, dur, clip, i)
+            clips.append(clip)
         audios.append((mp3, dur))
         t0 += dur
 
@@ -254,7 +321,8 @@ def generar(guion, carpeta_salida="salida"):
     crear_ass(todas, t0, guion.get("gancho", ""), ass)
 
     final = out_dir / f"{guion['id']}.mp4"
-    run(["ffmpeg", "-y", "-i", str(video), "-i", str(audio), "-vf", f"ass={ass}",
+    barra = f"drawbox=x=0:y=0:w='iw*t/{t0:.2f}':h=14:color=0xFFE600@0.95:t=fill"
+    run(["ffmpeg", "-y", "-i", str(video), "-i", str(audio), "-vf", f"ass={ass},{barra}",
          "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
          "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest", "-movflags", "+faststart", str(final)])
     return final, creditos
@@ -322,7 +390,7 @@ def publicar(video_path, caption, titulo, plataformas=("TIKTOK",)):
     print("[publicar] sigue en proceso; lo dejo programado en bundle.social")
     return post_id
 
-PROMPT_GUION = 'Eres el guionista de "El Archivo Curioso", una cuenta de TikTok en español (España) de curiosidades, historia y misterios reales.\n\nEscribe UN guion para un vídeo vertical de 35-50 segundos narrado por voz en off. Reglas:\n- Gancho brutal en la primera frase (menos de 12 palabras): una pregunta o afirmación que obligue a quedarse. Nada de "¿Sabías que...?".\n- Datos 100% reales y verificables. Nada de leyendas presentadas como hechos; si es leyenda, dilo.\n- Frases cortas, ritmo rápido, tono cercano de España (tú, no usted). Sin emojis en la narración.\n- 6 a 9 escenas. Cada escena = 1-2 frases narradas + una búsqueda de imagen EN INGLÉS, concreta y visual (ej. "Egyptian pyramid Giza sunset", "medieval manuscript", "Titanic ship 1912 photo"). Evita búsquedas de personas vivas.\n- Última escena: giro final o dato que sorprenda + llamada suave ("Sígueme para más archivos curiosos").\n- Caption: 1 frase intrigante + 4-6 hashtags (#curiosidades #historia #sabiasque #datoscuriosos + 1-2 del tema).\n- "gancho": texto corto (máx 6 palabras) que aparecerá escrito en pantalla los 3 primeros segundos.\n\nDevuelve SOLO JSON con esta forma:\n{"titulo": "...", "gancho": "...", "escenas": [{"texto": "...", "imagen": "..."}], "caption": "..."}\n'
+PROMPT_GUION = 'Eres el guionista de "El Archivo Curioso", una cuenta de TikTok en español (España) de curiosidades, historia y misterios reales.\n\nEscribe UN guion para un vídeo vertical de 35-50 segundos narrado por voz en off. Reglas:\n- Gancho brutal en la primera frase (menos de 12 palabras): una pregunta o afirmación que obligue a quedarse. Nada de "¿Sabías que...?".\n- Datos 100% reales y verificables. Nada de leyendas presentadas como hechos; si es leyenda, dilo.\n- Frases cortas, ritmo rápido, tono cercano de España (tú, no usted). Sin emojis en la narración.\n- 6 a 9 escenas. Cada escena = 1-2 frases narradas + "video": búsqueda EN INGLÉS de 1-3 palabras para un banco de VÍDEOS de stock genéricos (ej. "desert sand", "old ship ocean", "soldiers marching", "ancient ruins", "dark forest fog") + "imagen": búsqueda EN INGLÉS concreta de respaldo (ej. "Titanic ship 1912 photo"). Evita personas vivas.\n- Última escena: giro final o dato que sorprenda + llamada suave ("Sígueme para más archivos curiosos").\n- Caption: 1 frase intrigante + 4-6 hashtags (#curiosidades #historia #sabiasque #datoscuriosos + 1-2 del tema).\n- "gancho": texto corto (máx 6 palabras) que aparecerá escrito en pantalla los 3 primeros segundos.\n\nDevuelve SOLO JSON con esta forma:\n{"titulo": "...", "gancho": "...", "escenas": [{"texto": "...", "video": "...", "imagen": "..."}], "caption": "..."}\n'
 
 """Orquestador: coge el siguiente guion pendiente, genera el vídeo y lo publica.
 
