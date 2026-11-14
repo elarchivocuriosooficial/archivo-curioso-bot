@@ -5,5 +5,17 @@
   "post": "6273a026-4af4-48f0-b38c-c498a68f9439",
   "fecha": "2026-11-14T10:58",
   "origen": "cola"
+ },
+ {
+  "id": "2026-11-14-ballena-essex",
+  "titulo": "La ballena que hundió un barco y creó Moby Dick",
+  "redes": [
+   "TIKTOK",
+   "YOUTUBE",
+   "INSTAGRAM"
+  ],
+  "youtube_via": "bundle",
+  "fecha": "2026-11-14T19:16",
+  "origen": "cola"
  }
 ]
