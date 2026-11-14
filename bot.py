@@ -390,6 +390,87 @@ def publicar(video_path, caption, titulo, plataformas=("TIKTOK",)):
     print("[publicar] sigue en proceso; lo dejo programado en bundle.social")
     return post_id
 
+"""Instagram directo (API oficial de Meta, app propia en modo desarrollo: gratis, ~100 posts/24 h)."""
+IG_API = "https://graph.instagram.com/v23.0"
+
+
+def ig_disponible():
+    return bool(os.environ.get("IG_ACCESS_TOKEN"))
+
+
+def publicar_instagram(video_path, caption):
+    tok = os.environ["IG_ACCESS_TOKEN"]
+    r = requests.post(f"{IG_API}/me/media", data={"media_type": "REELS", "upload_type": "resumable",
+                                                  "caption": caption[:2200], "share_to_feed": "true",
+                                                  "access_token": tok}, timeout=60)
+    if r.status_code >= 300:
+        raise RuntimeError(f"IG contenedor {r.status_code}: {r.text[:500]}")
+    cid = r.json()["id"]
+    size = os.path.getsize(video_path)
+    with open(video_path, "rb") as f:
+        u = requests.post(f"https://rupload.facebook.com/ig-api-upload/v23.0/{cid}",
+                          headers={"Authorization": f"OAuth {tok}", "offset": "0", "file_size": str(size)},
+                          data=f, timeout=600)
+    if u.status_code >= 300:
+        raise RuntimeError(f"IG subida {u.status_code}: {u.text[:500]}")
+    for _ in range(40):
+        time.sleep(15)
+        s = requests.get(f"{IG_API}/{cid}", params={"fields": "status_code,status", "access_token": tok}, timeout=30).json()
+        print(f"[instagram] estado: {s.get('status_code')}")
+        if s.get("status_code") == "FINISHED":
+            break
+        if s.get("status_code") in ("ERROR", "EXPIRED"):
+            raise RuntimeError(f"IG procesado con error: {s}")
+    p = requests.post(f"{IG_API}/me/media_publish", data={"creation_id": cid, "access_token": tok}, timeout=60)
+    if p.status_code >= 300:
+        raise RuntimeError(f"IG publicar {p.status_code}: {p.text[:500]}")
+    return p.json().get("id")
+
+
+def renovar_token_instagram():
+    """Alarga la validez del token (60 días). Si cambiara, lo deja en salida/ para avisar."""
+    tok = os.environ.get("IG_ACCESS_TOKEN")
+    if not tok:
+        return
+    try:
+        r = requests.get("https://graph.instagram.com/refresh_access_token",
+                         params={"grant_type": "ig_refresh_token", "access_token": tok}, timeout=30)
+        d = r.json()
+        print(f"[instagram] token renovado, caduca en {int(d.get('expires_in', 0)) // 86400} días")
+        if d.get("access_token") and d["access_token"] != tok:
+            print("[instagram] AVISO: el token renovado es distinto; hay que actualizar el secreto IG_ACCESS_TOKEN")
+    except Exception as e:
+        print(f"[instagram] no se pudo renovar el token: {e}")
+
+
+"""YouTube extra con Upload-Post (plan gratis: 10 subidas/mes)."""
+UP_LIMITE_MES = int(os.environ.get("UP_LIMITE_MES", "10"))
+
+
+def publicar_youtube_uploadpost(video_path, titulo, caption):
+    with open(video_path, "rb") as f:
+        r = requests.post("https://api.upload-post.com/api/upload",
+                          headers={"Authorization": f"Apikey {os.environ['UPLOADPOST_API_KEY']}"},
+                          data={"user": os.environ.get("UPLOADPOST_USER", "default"), "platform[]": "youtube",
+                                "title": (titulo[:90] + " #shorts"), "description": caption[:4900]},
+                          files={"video": (os.path.basename(video_path), f, "video/mp4")}, timeout=600)
+    if r.status_code >= 300:
+        raise RuntimeError(f"Upload-Post {r.status_code}: {r.text[:500]}")
+    return "uploadpost"
+
+
+def usar_bundle_hoy():
+    """Reparte las 20 publicaciones gratis de bundle.social a lo largo del mes."""
+    import calendar
+    import datetime as dt
+    hoy = dt.date.today()
+    dias_restantes = calendar.monthrange(hoy.year, hoy.month)[1] - hoy.day + 1
+    rest = publicaciones_restantes()
+    usar = rest > 0 and (rest >= dias_restantes or rest / dias_restantes >= 0.6)
+    print(f"[reparto] bundle: quedan {rest} para {dias_restantes} días -> {'sí' if usar else 'no'}")
+    return usar
+
+
 PROMPT_GUION = 'Eres el guionista de "El Archivo Curioso", una cuenta de TikTok en español (España) de curiosidades, historia y misterios reales.\n\nEscribe UN guion para un vídeo vertical de 35-50 segundos narrado por voz en off. Reglas:\n- Gancho brutal en la primera frase (menos de 12 palabras): una pregunta o afirmación que obligue a quedarse. Nada de "¿Sabías que...?".\n- Datos 100% reales y verificables. Nada de leyendas presentadas como hechos; si es leyenda, dilo.\n- Frases cortas, ritmo rápido, tono cercano de España (tú, no usted). Sin emojis en la narración.\n- 6 a 9 escenas. Cada escena = 1-2 frases narradas + "video": búsqueda EN INGLÉS de 1-3 palabras para un banco de VÍDEOS de stock genéricos (ej. "desert sand", "old ship ocean", "soldiers marching", "ancient ruins", "dark forest fog") + "imagen": búsqueda EN INGLÉS concreta de respaldo (ej. "Titanic ship 1912 photo"). Evita personas vivas.\n- Última escena: giro final o dato que sorprenda + llamada suave ("Sígueme para más archivos curiosos").\n- Caption: 1 frase intrigante + 4-6 hashtags (#curiosidades #historia #sabiasque #datoscuriosos + 1-2 del tema).\n- "gancho": texto corto (máx 6 palabras) que aparecerá escrito en pantalla los 3 primeros segundos.\n\nDevuelve SOLO JSON con esta forma:\n{"titulo": "...", "gancho": "...", "escenas": [{"texto": "...", "video": "...", "imagen": "..."}], "caption": "..."}\n'
 
 """Orquestador: coge el siguiente guion pendiente, genera el vídeo y lo publica.
@@ -485,18 +566,50 @@ def main():
         print("[main] modo prueba: no se publica")
         return
 
-    restantes = publicaciones_restantes()
-    if restantes <= 0:
-        print("[main] sin publicaciones gratis este mes; se guarda para el mes que viene")
-        return
-    plataformas = tuple(p.strip() for p in os.environ.get("PLATAFORMAS", "TIKTOK").split(",") if p.strip())
-    post_id = publicar(str(video), caption, guion["titulo"], plataformas)
     import datetime as dt
-    publicados.append({"id": guion["id"], "titulo": guion["titulo"], "post": post_id,
+    mes = dt.date.today().strftime("%Y-%m")
+    plataformas = [p.strip() for p in os.environ.get("PLATAFORMAS", "TIKTOK").split(",") if p.strip()]
+    hechos, errores = {}, []
+
+    # 1) Instagram directo con la API de Meta (todos los días)
+    if "INSTAGRAM" in plataformas and ig_disponible():
+        renovar_token_instagram()
+        try:
+            hechos["INSTAGRAM"] = publicar_instagram(str(video), caption)
+        except Exception as e:
+            errores.append(f"instagram: {e}")
+        plataformas.remove("INSTAGRAM")
+
+    # 2) bundle.social (TikTok + YouTube + IG si no hay API propia) cuando toca por cupo
+    if plataformas and usar_bundle_hoy():
+        try:
+            pid = publicar(str(video), caption, guion["titulo"], tuple(plataformas))
+            for p in plataformas:
+                hechos[p] = pid
+        except Exception as e:
+            errores.append(f"bundle: {e}")
+    elif "YOUTUBE" in plataformas and os.environ.get("UPLOADPOST_API_KEY"):
+        # 3) Días sin bundle: YouTube con Upload-Post mientras quede cupo
+        usados = sum(1 for p in publicados if p.get("fecha", "").startswith(mes) and p.get("youtube_via") == "uploadpost")
+        if usados < UP_LIMITE_MES:
+            try:
+                hechos["YOUTUBE"] = publicar_youtube_uploadpost(str(video), guion["titulo"], caption)
+            except Exception as e:
+                errores.append(f"upload-post: {e}")
+
+    print(f"[main] publicado en: {', '.join(hechos) or 'ninguna'}")
+    for e in errores:
+        print(f"[main] ERROR {e}")
+    if not hechos:
+        if errores:
+            raise RuntimeError("No se pudo publicar en ninguna red")
+        print("[main] hoy no toca publicar (sin cupo); el guion queda para mañana")
+        return
+    publicados.append({"id": guion["id"], "titulo": guion["titulo"], "redes": list(hechos),
+                       "youtube_via": "uploadpost" if hechos.get("YOUTUBE") == "uploadpost" else "bundle",
                        "fecha": dt.datetime.utcnow().isoformat(timespec="minutes"), "origen": origen})
     PUBLICADOS.parent.mkdir(exist_ok=True)
     PUBLICADOS.write_text(json.dumps(publicados, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"[main] publicado ({restantes - 1} restantes este mes)")
 
 
 if __name__ == "__main__":
