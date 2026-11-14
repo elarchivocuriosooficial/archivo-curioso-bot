@@ -531,16 +531,26 @@ def guion_ia(titulos_previos):
         return None
     prompt = PROMPT_GUION
     prompt += "\n\nTemas YA publicados (no repitas):\n" + "\n".join(f"- {t}" for t in titulos_previos[-60:])
-    r = requests.post(
-        "https://models.github.ai/inference/chat/completions",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"model": os.environ.get("MODELO", "openai/gpt-4.1"),
-              "messages": [{"role": "user", "content": prompt}],
-              "response_format": {"type": "json_object"}, "temperature": 0.9},
-        timeout=120,
-    )
-    r.raise_for_status()
-    return json.loads(r.json()["choices"][0]["message"]["content"])
+    intentos = [("https://models.github.ai/inference/chat/completions", os.environ.get("MODELO", "openai/gpt-4.1")),
+                ("https://models.github.ai/inference/chat/completions", "openai/gpt-4o-mini"),
+                ("https://models.inference.ai.azure.com/chat/completions", "gpt-4o-mini")]
+    for i, (url, modelo) in enumerate(intentos):
+        try:
+            r = requests.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                              json={"model": modelo, "messages": [{"role": "user", "content": prompt}],
+                                    "response_format": {"type": "json_object"}, "temperature": 0.9},
+                              timeout=120)
+            if r.status_code >= 300 or not r.text.strip():
+                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]!r}")
+            g = json.loads(r.json()["choices"][0]["message"]["content"])
+            if g.get("escenas") and g.get("titulo"):
+                print(f"[ia] guion generado con {modelo}")
+                return g
+            raise RuntimeError("respuesta sin escenas")
+        except Exception as e:
+            print(f"[ia] fallo con {modelo}: {e}")
+            time.sleep(10 * (i + 1))
+    return None
 
 
 def siguiente_guion(publicados):
