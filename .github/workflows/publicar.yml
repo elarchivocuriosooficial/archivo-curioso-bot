@@ -37,6 +37,7 @@ jobs:
         env:
           MODO: ${{ github.event_name == 'schedule' && 'publicar' || inputs.modo }}
           BUNDLE_API_KEY: ${{ secrets.BUNDLE_API_KEY }}
+          PIXABAY_KEY: ${{ secrets.PIXABAY_KEY }}
           BUNDLE_TEAM_ID: ${{ vars.BUNDLE_TEAM_ID }}
           SHEET_CSV_URL: ${{ vars.SHEET_CSV_URL }}
           PLATAFORMAS: ${{ vars.PLATAFORMAS || 'TIKTOK' }}
