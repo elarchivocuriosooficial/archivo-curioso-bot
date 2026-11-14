@@ -391,7 +391,16 @@ def publicar(video_path, caption, titulo, plataformas=("TIKTOK",)):
     return post_id
 
 """Instagram directo (API oficial de Meta, app propia en modo desarrollo: gratis, ~100 posts/24 h)."""
-IG_API = "https://graph.instagram.com/v23.0"
+IG_USER_ID = os.environ.get("IG_USER_ID", "17841446134327858")  # @elarchivocurioso.oficial
+
+
+def _ig_base():
+    """Token EAA... (inicio de sesión unificado/Facebook) -> graph.facebook.com/{ig_id};
+    token IGAA... (inicio de sesión con Instagram) -> graph.instagram.com/me."""
+    tok = os.environ.get("IG_ACCESS_TOKEN", "")
+    if tok.startswith("EAA"):
+        return "https://graph.facebook.com/v23.0", IG_USER_ID
+    return "https://graph.instagram.com/v23.0", "me"
 
 
 def ig_disponible():
@@ -400,7 +409,8 @@ def ig_disponible():
 
 def publicar_instagram(video_path, caption):
     tok = os.environ["IG_ACCESS_TOKEN"]
-    r = requests.post(f"{IG_API}/me/media", data={"media_type": "REELS", "upload_type": "resumable",
+    IG_API, yo = _ig_base()
+    r = requests.post(f"{IG_API}/{yo}/media", data={"media_type": "REELS", "upload_type": "resumable",
                                                   "caption": caption[:2200], "share_to_feed": "true",
                                                   "access_token": tok}, timeout=60)
     if r.status_code >= 300:
@@ -421,7 +431,7 @@ def publicar_instagram(video_path, caption):
             break
         if s.get("status_code") in ("ERROR", "EXPIRED"):
             raise RuntimeError(f"IG procesado con error: {s}")
-    p = requests.post(f"{IG_API}/me/media_publish", data={"creation_id": cid, "access_token": tok}, timeout=60)
+    p = requests.post(f"{IG_API}/{yo}/media_publish", data={"creation_id": cid, "access_token": tok}, timeout=60)
     if p.status_code >= 300:
         raise RuntimeError(f"IG publicar {p.status_code}: {p.text[:500]}")
     return p.json().get("id")
@@ -430,7 +440,7 @@ def publicar_instagram(video_path, caption):
 def renovar_token_instagram():
     """Alarga la validez del token (60 días). Si cambiara, lo deja en salida/ para avisar."""
     tok = os.environ.get("IG_ACCESS_TOKEN")
-    if not tok:
+    if not tok or tok.startswith("EAA"):
         return
     try:
         r = requests.get("https://graph.instagram.com/refresh_access_token",
@@ -576,9 +586,11 @@ def main():
         renovar_token_instagram()
         try:
             hechos["INSTAGRAM"] = publicar_instagram(str(video), caption)
+            plataformas.remove("INSTAGRAM")
         except Exception as e:
-            errores.append(f"instagram: {e}")
-        plataformas.remove("INSTAGRAM")
+            # si falla (p. ej. token caducado), Instagram vuelve a ir por bundle
+            print(f"[instagram] ERROR API propia, se intentará por bundle: {e}")
+            errores.append(f"instagram-api: {e}")
 
     # 2) bundle.social (TikTok + YouTube + IG si no hay API propia) cuando toca por cupo
     if plataformas and usar_bundle_hoy():
