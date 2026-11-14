@@ -407,7 +407,7 @@ def ig_disponible():
     return bool(os.environ.get("IG_ACCESS_TOKEN"))
 
 
-def publicar_instagram(video_path, caption):
+def publicar_instagram(video_path, caption, publicar_ya=True):
     tok = os.environ["IG_ACCESS_TOKEN"]
     IG_API, yo = _ig_base()
     r = requests.post(f"{IG_API}/{yo}/media", data={"media_type": "REELS", "upload_type": "resumable",
@@ -416,13 +416,20 @@ def publicar_instagram(video_path, caption):
     if r.status_code >= 300:
         raise RuntimeError(f"IG contenedor {r.status_code}: {r.text[:500]}")
     cid = r.json()["id"]
-    size = os.path.getsize(video_path)
-    with open(video_path, "rb") as f:
-        u = requests.post(f"https://rupload.facebook.com/ig-api-upload/v23.0/{cid}",
-                          headers={"Authorization": f"OAuth {tok}", "offset": "0", "file_size": str(size)},
-                          data=f, timeout=600)
-    if u.status_code >= 300:
-        raise RuntimeError(f"IG subida {u.status_code}: {u.text[:500]}")
+    datos = Path(video_path).read_bytes()
+    fallos = []
+    for url_up in (f"https://rupload.facebook.com/ig-api-upload/v23.0/{cid}",
+                   f"https://rupload.facebook.com/ig-api-upload/{cid}"):
+        u = requests.post(url_up, headers={"Authorization": f"OAuth {tok}", "offset": "0",
+                                           "file_size": str(len(datos)),
+                                           "Content-Type": "application/octet-stream"},
+                          data=datos, timeout=600)
+        if u.status_code < 300:
+            print(f"[instagram] subida OK ({url_up.split('ig-api-upload/')[1]})")
+            break
+        fallos.append(f"{u.status_code}: {u.text[:300]}")
+    else:
+        raise RuntimeError(f"IG subida: {' | '.join(fallos)}")
     for _ in range(40):
         time.sleep(15)
         s = requests.get(f"{IG_API}/{cid}", params={"fields": "status_code,status", "access_token": tok}, timeout=30).json()
@@ -431,6 +438,9 @@ def publicar_instagram(video_path, caption):
             break
         if s.get("status_code") in ("ERROR", "EXPIRED"):
             raise RuntimeError(f"IG procesado con error: {s}")
+    if not publicar_ya:
+        print("[instagram] prueba OK: contenedor listo, NO se publica")
+        return cid
     p = requests.post(f"{IG_API}/{yo}/media_publish", data={"creation_id": cid, "access_token": tok}, timeout=60)
     if p.status_code >= 300:
         raise RuntimeError(f"IG publicar {p.status_code}: {p.text[:500]}")
@@ -584,6 +594,11 @@ def main():
 
     if modo != "publicar":
         print("[main] modo prueba: no se publica")
+        if ig_disponible():
+            try:
+                publicar_instagram(str(video), caption, publicar_ya=False)
+            except Exception as e:
+                print(f"[instagram] prueba fallida: {e}")
         return
 
     import datetime as dt
