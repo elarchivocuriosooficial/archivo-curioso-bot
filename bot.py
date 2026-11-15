@@ -265,6 +265,31 @@ def fondo_liso(salida):
     run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={color}:s={W}x{H}", "-frames:v", "1", str(salida)])
 
 
+"""Música de fondo: Kevin MacLeod (incompetech.com), licencia CC BY 4.0 (se acredita en el texto)."""
+MUSICA = ["Dark Fog", "Investigations", "Hidden Agenda", "Echoes of Time", "Curse of the Scarab",
+          "Mystery Bazaar", "Spy Glass", "Lightless Dawn", "Night Vigil", "Thinking Music"]
+VOL_MUSICA = float(os.environ.get("VOL_MUSICA", "0.22"))
+
+
+def elegir_musica(carpeta):
+    """Descarga una pista al azar. Devuelve (ruta, título) o (None, None) si no hay red."""
+    if os.environ.get("SIN_MUSICA"):
+        return None, None
+    for titulo in random.sample(MUSICA, len(MUSICA)):
+        destino = Path(carpeta) / "musica.mp3"
+        try:
+            r = requests.get("https://incompetech.com/music/royalty-free/mp3-royaltyfree/"
+                             + requests.utils.quote(titulo) + ".mp3", headers=UA, timeout=60)
+            r.raise_for_status()
+            if len(r.content) < 200000 or r.content[:3] != b"ID3" and r.content[:2] != b"\xff\xfb":
+                raise ValueError("no es audio")
+            destino.write_bytes(r.content)
+            return destino, titulo
+        except Exception as e:
+            print(f"[musica] '{titulo}': {e}")
+    return None, None
+
+
 def generar(guion, carpeta_salida="salida"):
     out_dir = Path(carpeta_salida)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -313,9 +338,26 @@ def generar(guion, carpeta_salida="salida"):
         entradas += ["-i", str(mp3)]
         filtros.append(f"[{j}:a]apad,atrim=0:{dur:.3f}[a{j}]")
     filtro = ";".join(filtros) + ";" + "".join(f"[a{j}]" for j in range(len(audios))) + \
-        f"concat=n={len(audios)}:v=0:a=1,loudnorm=I=-14:TP=-1.5[a]"
+        f"concat=n={len(audios)}:v=0:a=1[voz]"
+    musica, titulo_musica = elegir_musica(tmp)
+    if musica:
+        k = len(audios)
+        total_m = duracion(musica)
+        ini_m = random.uniform(0, max(0.0, min(30.0, total_m - t0 - 2))) if total_m > t0 + 5 else 0.0
+        filtro += (f";[{k}:a]atrim=start={ini_m:.2f},asetpts=PTS-STARTPTS,aresample=48000,"
+                   f"volume={VOL_MUSICA},afade=t=in:d=1.2,afade=t=out:st={max(0.0, t0 - 2):.2f}:d=2[mus];"
+                   f"[voz]aresample=48000,asplit[v1][v2];"
+                   f"[mus][v2]sidechaincompress=threshold=0.04:ratio=6:attack=15:release=350[musd];"
+                   f"[v1][musd]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5[a]")
+        entradas += ["-stream_loop", "-1", "-i", str(musica)]
+        print(f"[musica] {titulo_musica}")
+    else:
+        filtro += ";[voz]loudnorm=I=-14:TP=-1.5[a]"
     audio = tmp / "audio.m4a"
-    run(["ffmpeg", "-y", *entradas, "-filter_complex", filtro, "-map", "[a]", "-c:a", "aac", "-b:a", "160k", str(audio)])
+    run(["ffmpeg", "-y", *entradas, "-filter_complex", filtro, "-map", "[a]", "-t", f"{t0:.3f}",
+         "-c:a", "aac", "-b:a", "160k", str(audio)])
+    if titulo_musica:
+        creditos.append(f"MÚSICA:{titulo_musica}")
 
     ass = tmp / "subs.ass"
     crear_ass(todas, t0, guion.get("gancho", ""), ass)
@@ -586,8 +628,12 @@ def main():
     print(f"[main] guion '{guion['titulo']}' ({origen})")
     video, creditos = generar(guion, "salida")
     caption = guion["caption"].strip()
+    musica = [c[7:] for c in creditos if c.startswith("MÚSICA:")]
+    creditos = [c for c in creditos if not c.startswith("MÚSICA:")]
     if creditos:
         caption += "\n\nImágenes: " + "; ".join(dict.fromkeys(creditos))
+    if musica:
+        caption += f'\n\nMúsica: "{musica[0]}" de Kevin MacLeod (incompetech.com), licencia CC BY 4.0'
     Path("salida/caption.txt").write_text(caption, encoding="utf-8")
     Path("salida/guion.json").write_text(json.dumps(guion, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"[main] vídeo listo: {video}")
