@@ -53,5 +53,17 @@
   "youtube_via": "bundle",
   "fecha": "2026-11-16T19:00",
   "origen": "cola"
+ },
+ {
+  "id": "2026-11-14-mary-celeste",
+  "titulo": "Mary Celeste: el barco que apareció sin nadie a bordo",
+  "redes": [
+   "INSTAGRAM",
+   "TIKTOK",
+   "YOUTUBE"
+  ],
+  "youtube_via": "bundle",
+  "fecha": "2026-11-17T19:06",
+  "origen": "cola"
  }
 ]
